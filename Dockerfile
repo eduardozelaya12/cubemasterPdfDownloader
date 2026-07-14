@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+WORKDIR /code
+
+# Dependencias primeiro (aproveita cache de camada)
+COPY requirements.txt /code/requirements.txt
+RUN pip install --no-cache-dir -r /code/requirements.txt
+
+# Codigo da aplicacao
+COPY app /code/app
+
+# Porta interna do container
+EXPOSE 80
+
+# Mesmo padrao dos outros servicos do host: uvicorn app:app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]

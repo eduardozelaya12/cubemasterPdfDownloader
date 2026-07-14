@@ -1,0 +1,20 @@
+services:
+  cubemaster_pdf:
+    build: .
+    container_name: cubemaster_pdf_downloader
+    environment:
+      # Pasta de destino DENTRO do container (o volume abaixo aponta pra ela)
+      - DEST_DIR=/data/clientes
+      # Preencha SOMENTE se os links do CubeMaster exigirem token para baixar.
+      # Deixe vazio se abrem sem autenticacao.
+      - CUBEMASTER_TOKEN=
+      - DOWNLOAD_TIMEOUT=60
+    volumes:
+      # Pasta compartilhada do PeopleSoft montada no host de containers
+      # host: psappt1860 | UNC: //10.24.7.33/MobilityFiles/clientes
+      # PRD (ajbogapps1): /mnt/ajbogapps1/FtpGestionDocTest/MobilityFiles/clientes:/data/clientes
+      - /mnt/psappt1/mobilityFiles/clientes:/data/clientes
+    ports:
+      # host:container  -> escolha uma porta livre no host (ver docker ps)
+      - "9097:80"
+    restart: unless-stopped
