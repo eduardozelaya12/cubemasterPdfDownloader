@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<proxy xmlns="http://ws.apache.org/ns/synapse" name="LoadsProxy" transports="http https"
+    startOnLoad="true">
+    <target>
+        <inSequence>
+            <log level="custom">
+                <property name="ETAPA" value="[0] RECEBIDO" />
+                <property name="CT_ORIGINAL" expression="get-property('transport','Content-Type')" />
+            </log>
+            <!-- [AJUSTE 1] Id da requisicao (= correlation_id do log do MI). Vai nos erros
+            devolvidos ao cliente. -->
+            <property name="CORRELATION_ID"
+                expression="substring-after(get-property('MessageID'), 'urn:uuid:')"
+                scope="operation" type="STRING" />
+
+            <!-- [AJUSTE 2] Corpo vazio: responde 400 aqui, antes de o class mediator quebrar -->
+            <filter xpath="string-length(normalize-space($body)) = 0">
+                <then>
+                    <log level="custom">
+                        <property name="ETAPA" value="[ERRO] CORPO VAZIO" />
+                    </log>
+                    <payloadFactory media-type="json">
+                        <format>{"error": true, "origem": "LOADSPROXY", "codigo": "CORPO_VAZIO",
+                            "mensagem": "A requisicao chegou sem corpo. Envie o JSON da carga.",
+                            "detalhe": "", "correlationId": "$1"}</format>
+                        <args>
+                            <arg evaluator="xml"
+                                expression="get-property('operation','CORRELATION_ID')" />
+                        </args>
+                    </payloadFactory>
+                    <property name="NO_ENTITY_BODY" scope="axis2" action="remove" />
+                    <property name="messageType" value="application/json" scope="axis2"
+                        type="STRING" />
+                    <property name="HTTP_SC" value="400" scope="axis2" type="STRING" />
+                    <respond />
+                </then>
+            </filter>
+
+            <!-- [AJUSTE 3] FASE: diz ao faultSequence em que ponto o fluxo estava quando falhou -->
+            <property name="FASE" value="VALIDACAO" />
+            <!-- Desembrulha o JSON, le o uom e injeta o corpo JSON real -->
+            <class name="cubemaster.loadsCubemasterMediator" />
+            <log level="custom">
+                <property name="ETAPA" value="[1] APOS REBUILD" />
+                <property name="UOM_LIDO" expression="$ctx:uri.var.uom" />
+            </log>
+            <property name="uri.var.cube_url"
+                expression="fn:concat('https://api.quality.cubemaster.net/loads?loadSaved=true&amp;loadShared=true&amp;UOM=', $ctx:uri.var.uom)"
+                scope="default" type="STRING" />
+            <!-- [AJUSTE 9] Token no Secure Vault (deployment.toml: [secrets] cubemaster_token =
+            "[...]").
+                 Enquanto o vault nao estiver configurado, use: value="<token>" no lugar de expression. -->
+            <header name="TokenId" scope="transport"
+                expression="wso2:vault-lookup('cubemaster_token')" />
+            <property name="Accept" value="application/json" scope="transport" type="STRING" />
+            <property name="REST_URL_POSTFIX" scope="axis2" action="remove" />
+            <property name="DISABLE_CHUNKING" value="true" scope="axis2" type="STRING" />
+            <!-- Valide no full log: corpo sai com "cargoes":[...] no topo -->
+            <log level="custom">
+                <property name="ETAPA" value="[2] ENVIANDO PARA CUBEMASTER" />
+                <property name="URL" expression="$ctx:uri.var.cube_url" />
+                <property name="UOM" expression="$ctx:uri.var.uom" />
+            </log>
+            <log level="full" />
+            <property name="FASE" value="CUBEMASTER" />
+            <send>
+                <endpoint>
+                    <http method="POST" uri-template="{uri.var.cube_url}">
+                        <timeout>
+                            <duration>120000</duration>
+                            <responseAction>fault</responseAction>
+                        </timeout>
+                        <!-- [AJUSTE 8] Sem suspensao: uma falha nao bloqueia as proximas chamadas
+                        por ~30s -->
+                        <suspendOnFailure>
+                            <errorCodes>-1</errorCodes>
+                            <initialDuration>0</initialDuration>
+                            <progressionFactor>1.0</progressionFactor>
+                            <maximumDuration>0</maximumDuration>
+                        </suspendOnFailure>
+                        <markForSuspension>
+                            <errorCodes>-1</errorCodes>
+                        </markForSuspension>
+                    </http>
+                </endpoint>
+            </send>
+        </inSequence>
+
+        <outSequence>
+            <property name="FASE" value="RESPOSTA" />
+            <!-- [AJUSTE 4] Guarda o STATUS (novo) e o CORPO do CubeMaster antes de chamar o
+            downloader -->
+            <property name="CM_STATUS" expression="get-property('axis2','HTTP_SC')"
+                scope="operation" type="STRING" />
+            <log level="custom">
+                <property name="ETAPA" value="[3] RESPOSTA DO CUBEMASTER" />
+                <property name="HTTP_STATUS" expression="get-property('operation','CM_STATUS')" />
+            </log>
+            <log level="full" />
+            <property name="CUBEMASTER_RESPONSE" expression="json-eval($.)" scope="operation"
+                type="STRING" />
+
+            <!-- [AJUSTE 5] Decide pelo status do CubeMaster -->
+            <switch source="get-property('operation','CM_STATUS')">
+                <!-- Calculou: baixa os PDFs -->
+                <case regex="2\d\d">
+                    <property name="FASE" value="PDF" />
+                    <property name="messageType" value="application/json" scope="axis2"
+                        type="STRING" />
+                    <call>
+                        <endpoint>
+                            <http method="POST"
+                                uri-template="http://dockertst.ajover.com:9097/reports/download">
+                                <timeout>
+                                    <duration>90000</duration>
+                                    <responseAction>fault</responseAction>
+                                </timeout>
+                                <suspendOnFailure>
+                                    <errorCodes>-1</errorCodes>
+                                    <initialDuration>0</initialDuration>
+                                    <progressionFactor>1.0</progressionFactor>
+                                    <maximumDuration>0</maximumDuration>
+                                </suspendOnFailure>
+                                <markForSuspension>
+                                    <errorCodes>-1</errorCodes>
+                                </markForSuspension>
+                            </http>
+                        </endpoint>
+                    </call>
+                    <property name="PDF_HTTP_SC" expression="get-property('axis2','HTTP_SC')"
+                        type="STRING" />
+                    <!-- 200 -> status vem do corpo (OK | PARCIAL | SEM_PDF); qualquer outro ->
+                    FALHOU -->
+                    <filter source="$ctx:PDF_HTTP_SC" regex="200">
+                        <then>
+                            <property name="PDF_STATUS" expression="json-eval($.status)"
+                                type="STRING" />
+                        </then>
+                        <else>
+                            <property name="PDF_STATUS" value="FALHOU" type="STRING" />
+                        </else>
+                    </filter>
+                    <log level="custom">
+                        <property name="ETAPA" value="[4] RESPOSTA DO PDF DOWNLOADER" />
+                        <property name="HTTP_STATUS" expression="$ctx:PDF_HTTP_SC" />
+                        <property name="PDF_STATUS" expression="$ctx:PDF_STATUS" />
+                        <!-- [AJUSTE 7] json-eval (e nao $body): o corpo e JSON -->
+                        <property name="BODY" expression="json-eval($.)" />
+                    </log>
+                </case>
+                <!-- Token invalido: problema de configuracao, nao do usuario -->
+                <case regex="401|403">
+                    <property name="ERRO_STATUS" value="502" />
+                    <property name="ERRO_CODIGO" value="CUBEMASTER_AUTENTICACAO" />
+                    <property name="ERRO_MENSAGEM"
+                        value="Falha de autenticacao entre a integracao e o CubeMaster. Acione o suporte de integracao." />
+                </case>
+                <case regex="5\d\d">
+                    <property name="ERRO_STATUS" value="502" />
+                    <property name="ERRO_CODIGO" value="CUBEMASTER_ERRO_INTERNO" />
+                    <property name="ERRO_MENSAGEM"
+                        value="O CubeMaster retornou erro interno. Tente novamente mais tarde." />
+                </case>
+                <!-- Demais 4xx (ex.: 400 de validacao): NAO chama o downloader; o erro do
+                CubeMaster vai intacto -->
+                <default>
+                    <property name="PDF_STATUS" value="IGNORADO" type="STRING" />
+                </default>
+            </switch>
+
+            <!-- [AJUSTE 6] Resposta ao PeopleSoft -->
+            <filter xpath="boolean($ctx:ERRO_CODIGO)">
+                <then>
+                    <!-- erro que o usuario nao resolve (401/403/5xx): envelope padrao -->
+                    <payloadFactory media-type="json">
+                        <format>{"error": true, "origem": "CUBEMASTER", "codigo": "$1", "mensagem":
+                            "$2", "detalhe": "CubeMaster respondeu HTTP $3", "correlationId": "$4"}</format>
+                        <args>
+                            <arg evaluator="xml" expression="$ctx:ERRO_CODIGO" />
+                            <arg evaluator="xml" expression="$ctx:ERRO_MENSAGEM" />
+                            <arg evaluator="xml" expression="get-property('operation','CM_STATUS')" />
+                            <arg evaluator="xml"
+                                expression="get-property('operation','CORRELATION_ID')" />
+                        </args>
+                    </payloadFactory>
+                    <property name="TRANSPORT_HEADERS" scope="axis2" action="remove" />
+                    <property name="messageType" value="application/json" scope="axis2"
+                        type="STRING" />
+                    <property name="HTTP_SC" expression="$ctx:ERRO_STATUS" scope="axis2"
+                        type="STRING" />
+                    <log level="custom">
+                        <property name="ETAPA" value="[5][ERRO] RESPOSTA AO PEOPLESOFT" />
+                        <property name="HTTP_STATUS" expression="$ctx:ERRO_STATUS" />
+                        <property name="CODIGO" expression="$ctx:ERRO_CODIGO" />
+                    </log>
+                    <respond />
+                </then>
+                <else>
+                    <!-- restaura CORPO e STATUS originais do CubeMaster; resultado dos PDFs vai no
+                    header -->
+                    <payloadFactory media-type="json">
+                        <format>$1</format>
+                        <args>
+                            <arg evaluator="xml"
+                                expression="get-property('operation','CUBEMASTER_RESPONSE')" />
+                        </args>
+                    </payloadFactory>
+                    <property name="TRANSPORT_HEADERS" scope="axis2" action="remove" />
+                    <property name="messageType" value="application/json" scope="axis2"
+                        type="STRING" />
+                    <property name="HTTP_SC" expression="get-property('operation','CM_STATUS')"
+                        scope="axis2" type="STRING" />
+                    <header name="X-Pdf-Status" scope="transport" expression="$ctx:PDF_STATUS" />
+                    <log level="custom">
+                        <property name="ETAPA" value="[5] RESPOSTA AO PEOPLESOFT" />
+                        <property name="HTTP_STATUS"
+                            expression="get-property('operation','CM_STATUS')" />
+                        <property name="PDF_STATUS" expression="$ctx:PDF_STATUS" />
+                    </log>
+                    <respond />
+                </else>
+            </filter>
+        </outSequence>
+
+        <faultSequence>
+            <log level="custom">
+                <property name="ETAPA" value="[ERRO] FALHA NO FLUXO" />
+                <property name="FASE" expression="$ctx:FASE" />
+                <property name="ERROR_CODE" expression="get-property('ERROR_CODE')" />
+                <property name="ERROR_MESSAGE" expression="get-property('ERROR_MESSAGE')" />
+                <property name="ERROR_DETAIL" expression="get-property('ERROR_DETAIL')" />
+            </log>
+            <log level="full" />
+            <!-- [AJUSTE 3] Erro especifico conforme a FASE -->
+            <switch source="$ctx:FASE">
+                <!-- Downloader fora do ar / timeout: a carga JA esta calculada -> responde
+                normalmente -->
+                <case regex="PDF">
+                    <payloadFactory media-type="json">
+                        <format>$1</format>
+                        <args>
+                            <arg evaluator="xml"
+                                expression="get-property('operation','CUBEMASTER_RESPONSE')" />
+                        </args>
+                    </payloadFactory>
+                    <property name="TRANSPORT_HEADERS" scope="axis2" action="remove" />
+                    <property name="messageType" value="application/json" scope="axis2"
+                        type="STRING" />
+                    <property name="HTTP_SC" expression="get-property('operation','CM_STATUS')"
+                        scope="axis2" type="STRING" />
+                    <header name="X-Pdf-Status" scope="transport" value="FALHOU" />
+                    <log level="custom">
+                        <property name="ETAPA" value="[5] RESPOSTA AO PEOPLESOFT (PDF FALHOU)" />
+                        <property name="HTTP_STATUS"
+                            expression="get-property('operation','CM_STATUS')" />
+                    </log>
+                    <respond />
+                </case>
+                <case regex="VALIDACAO">
+                    <property name="ERRO_STATUS" value="400" />
+                    <property name="ERRO_ORIGEM" value="LOADSPROXY" />
+                    <property name="ERRO_CODIGO" value="REQUISICAO_INVALIDA" />
+                    <property name="ERRO_MENSAGEM"
+                        value="Nao foi possivel interpretar o JSON da carga (formato invalido ou campo uom ausente)." />
+                </case>
+                <case regex="CUBEMASTER">
+                    <property name="ERRO_ORIGEM" value="CUBEMASTER" />
+                    <switch source="get-property('ERROR_CODE')">
+                        <case regex="101504|101508">
+                            <property name="ERRO_STATUS" value="504" />
+                            <property name="ERRO_CODIGO" value="CUBEMASTER_TIMEOUT" />
+                            <property name="ERRO_MENSAGEM"
+                                value="O CubeMaster nao respondeu a tempo. Tente novamente." />
+                        </case>
+                        <default>
+                            <property name="ERRO_STATUS" value="502" />
+                            <property name="ERRO_CODIGO" value="CUBEMASTER_INDISPONIVEL" />
+                            <property name="ERRO_MENSAGEM"
+                                value="Nao foi possivel conectar ao CubeMaster. Tente novamente mais tarde." />
+                        </default>
+                    </switch>
+                </case>
+                <default>
+                    <property name="ERRO_STATUS" value="500" />
+                    <property name="ERRO_ORIGEM" value="LOADSPROXY" />
+                    <property name="ERRO_CODIGO" value="ERRO_INTERNO" />
+                    <property name="ERRO_MENSAGEM"
+                        value="Erro inesperado na integracao. Informe o correlationId ao suporte." />
+                </default>
+            </switch>
+            <!-- Envelope padrao. Troca " \ e quebras de linha do detalhe para nao gerar JSON
+            invalido. -->
+            <property name="ERRO_DETALHE"
+                expression="translate(substring(get-property('ERROR_MESSAGE'), 1, 300), '&quot;\&#10;&#13;&#9;', &quot;'/   &quot;)"
+                type="STRING" />
+            <payloadFactory media-type="json">
+                <format>{"error": true, "origem": "$1", "codigo": "$2", "mensagem": "$3", "detalhe":
+                    "$4", "correlationId": "$5"}</format>
+                <args>
+                    <arg evaluator="xml" expression="$ctx:ERRO_ORIGEM" />
+                    <arg evaluator="xml" expression="$ctx:ERRO_CODIGO" />
+                    <arg evaluator="xml" expression="$ctx:ERRO_MENSAGEM" />
+                    <arg evaluator="xml" expression="$ctx:ERRO_DETALHE" />
+                    <arg evaluator="xml" expression="get-property('operation','CORRELATION_ID')" />
+                </args>
+            </payloadFactory>
+            <property name="TRANSPORT_HEADERS" scope="axis2" action="remove" />
+            <property name="NO_ENTITY_BODY" scope="axis2" action="remove" />
+            <property name="messageType" value="application/json" scope="axis2" type="STRING" />
+            <property name="HTTP_SC" expression="$ctx:ERRO_STATUS" scope="axis2" type="STRING" />
+            <log level="custom">
+                <property name="ETAPA" value="[ERRO] RESPOSTA AO PEOPLESOFT" />
+                <property name="HTTP_STATUS" expression="$ctx:ERRO_STATUS" />
+                <property name="CODIGO" expression="$ctx:ERRO_CODIGO" />
+            </log>
+            <!-- respond substitui o antigo RESPONSE=true + remover To + send -->
+            <respond />
+        </faultSequence>
+    </target>
+</proxy>
