@@ -107,7 +107,6 @@ class ReportRequest(BaseModel):
 
 class DownloadResult(BaseModel):
     # OK = todos salvos | PARCIAL = algum falhou | SEM_PDF = pdfLinks null/vazio.
-    # Lido pelo LoadsProxy (json-eval($.status)) para montar o header X-Pdf-Status.
     status: str
     salvos: list
     erros: list

@@ -236,7 +236,7 @@ especial de quem chama.
 ```
 
 `status`: `OK` (todos salvos), `PARCIAL` (algum falhou, ver `erros`) ou `SEM_PDF`.
-O LoadsProxy repassa esse valor ao PeopleSoft no header `X-Pdf-Status`.
+O LoadsProxy registra a resposta do downloader no log (etapa `[4]`).
 
 **Response `422`** — o corpo não é uma resposta de cálculo (ex.: erro 400 do CubeMaster).
 O motivo é registrado no log do container.
@@ -308,6 +308,11 @@ o serviço já sabe ler `document.title` e `reportLinks.pdfLinks` de dentro do J
 inteiro e ignora o resto. Não é preciso checar `pdfLinks != null` antes de chamar:
 se vier `null` (cálculo falhou: `CargoIsTooSmall`, `CargoIsTooBig` etc.), o serviço
 responde `200` sem baixar nada.
+
+O `LoadsProxy` só chama este serviço quando o CubeMaster responde **2xx**. Se o
+CubeMaster recusar a carga (ex.: `400` por campo inválido), o downloader não é
+chamado e o PeopleSoft recebe o status e o corpo de erro originais do CubeMaster.
+O status HTTP devolvido ao PeopleSoft é sempre o do CubeMaster, nunca o deste serviço.
 
 ---
 
