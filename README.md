@@ -218,6 +218,7 @@ especial de quem chama.
 
 ```json
 {
+  "status": "OK",
   "salvos": [
     "resumen_carga_AJV4669166-2026-07-01-13.25.51.000000.pdf",
     "instrucciones_carga_AJV4669166-2026-07-01-13.25.51.000000.pdf",
@@ -231,9 +232,14 @@ especial de quem chama.
 **Response `200` (sem links / pdfLinks null):**
 
 ```json
-{ "salvos": [], "erros": [], "mensagem": "Sem pdfLinks - nada a baixar" }
+{ "status": "SEM_PDF", "salvos": [], "erros": [], "mensagem": "Sem pdfLinks - nada a baixar" }
 ```
 
+`status`: `OK` (todos salvos), `PARCIAL` (algum falhou, ver `erros`) ou `SEM_PDF`.
+O LoadsProxy repassa esse valor ao PeopleSoft no header `X-Pdf-Status`.
+
+**Response `422`** — o corpo não é uma resposta de cálculo (ex.: erro 400 do CubeMaster).
+O motivo é registrado no log do container.
 **Response `502`** (todos os downloads falharam) — corpo traz `salvos` e `erros` por arquivo.
 **Response `500`** — pasta de destino inacessível (problema de volume/permissão).
 

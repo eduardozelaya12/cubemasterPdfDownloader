@@ -17,7 +17,9 @@ import re
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field
 
 # openlink.asp?...&to=PDF&r=N& nao devolve o PDF direto: devolve uma pagina
@@ -104,6 +106,9 @@ class ReportRequest(BaseModel):
 
 
 class DownloadResult(BaseModel):
+    # OK = todos salvos | PARCIAL = algum falhou | SEM_PDF = pdfLinks null/vazio.
+    # Lido pelo LoadsProxy (json-eval($.status)) para montar o header X-Pdf-Status.
+    status: str
     salvos: list
     erros: list
     mensagem: Optional[str] = None
@@ -166,6 +171,13 @@ def _baixar_pdf(url: str, destino: str) -> None:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.exception_handler(RequestValidationError)
+async def log_validation_error(request: Request, exc: RequestValidationError):
+    """Registra no log o motivo do 422 (antes so aparecia a linha do uvicorn)."""
+    logger.warning("422 em %s: %s", request.url.path, exc.errors())
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.get("/health")
 def health():
     """Healthcheck simples."""
@@ -195,7 +207,7 @@ def download_reports(req: ReportRequest):
 
     if not links:
         logger.info("Nenhum pdfLink informado para title=%s. Nada a baixar.", title)
-        return DownloadResult(salvos=[], erros=[], mensagem="Sem pdfLinks - nada a baixar")
+        return DownloadResult(status="SEM_PDF", salvos=[], erros=[], mensagem="Sem pdfLinks - nada a baixar")
 
     try:
         os.makedirs(DEST_DIR, exist_ok=True)
@@ -223,4 +235,4 @@ def download_reports(req: ReportRequest):
             detail={"salvos": salvos, "erros": erros},
         )
 
-    return DownloadResult(salvos=salvos, erros=erros)
+    return DownloadResult(status="PARCIAL" if erros else "OK", salvos=salvos, erros=erros)
